@@ -227,6 +227,64 @@ class RelayTests(unittest.TestCase):
 
     @patch("scripts.relay.matching", return_value=True)
     @patch("scripts.relay.source_api")
+    def test_dcr_deletes_unchanged_same_repo_branch_after_tested_merge(self, api, matching):
+        source = relay.SOURCES["dcr"]
+        pr = {"state": "open", "draft": False, "base": {"ref": "main"},
+              "head": {"sha": self.item["head"], "ref": "fix/x-widget-retry",
+                       "repo": {"full_name": source["repository"]}},
+              "merge_commit_sha": self.item["merge"], "user": {"login": "clcocd"}}
+        api.side_effect = [
+            pr,
+            {"parents": [{"sha": self.item["base"]}, {"sha": self.item["head"]}]},
+            {"object": {"sha": self.item["merge"]}},
+            {"object": {"sha": self.item["head"]}},
+            None,
+        ]
+        relay.merge_dcr_tested(source, 105, self.item)
+        self.assertEqual(api.call_count, 5)
+        self.assertEqual(api.call_args.args, (source, "/git/refs/heads/fix/x-widget-retry"))
+        self.assertEqual(api.call_args.kwargs, {"token": "control", "method": "DELETE"})
+
+    @patch("scripts.relay.matching", return_value=True)
+    @patch("scripts.relay.source_api")
+    def test_dcr_does_not_delete_branch_when_head_changed(self, api, matching):
+        source = relay.SOURCES["dcr"]
+        pr = {"state": "open", "draft": False, "base": {"ref": "main"},
+              "head": {"sha": self.item["head"], "ref": "feature/changed",
+                       "repo": {"full_name": source["repository"]}},
+              "merge_commit_sha": self.item["merge"], "user": {"login": "clcocd"}}
+        api.side_effect = [
+            pr,
+            {"parents": [{"sha": self.item["base"]}, {"sha": self.item["head"]}]},
+            {"object": {"sha": self.item["merge"]}},
+            {"object": {"sha": "d" * 40}},
+        ]
+        relay.merge_dcr_tested(source, 105, self.item)
+        self.assertEqual(api.call_count, 4)
+        self.assertEqual(api.call_args.args, (source, "/git/ref/heads/feature/changed"))
+
+    @patch("scripts.relay.matching", return_value=True)
+    @patch("scripts.relay.source_api")
+    def test_dcr_does_not_delete_fork_or_main_branch(self, api, matching):
+        source = relay.SOURCES["dcr"]
+        for name, repository in (("fork/change", "someone/DCR-Kotlin"), ("main", source["repository"])):
+            with self.subTest(name=name):
+                pr = {"state": "open", "draft": False, "base": {"ref": "main"},
+                      "head": {"sha": self.item["head"], "ref": name,
+                               "repo": {"full_name": repository}},
+                      "merge_commit_sha": self.item["merge"], "user": {"login": "clcocd"}}
+                api.reset_mock()
+                api.side_effect = [
+                    pr,
+                    {"parents": [{"sha": self.item["base"]}, {"sha": self.item["head"]}]},
+                    {"object": {"sha": self.item["merge"]}},
+                ]
+                relay.merge_dcr_tested(source, 105, self.item)
+                self.assertEqual(api.call_count, 3)
+                self.assertEqual(api.call_args.kwargs["method"], "PATCH")
+
+    @patch("scripts.relay.matching", return_value=True)
+    @patch("scripts.relay.source_api")
     def test_dcr_auto_merge_rejects_unexpected_merge_parents(self, api, matching):
         api.side_effect = [
             {"state": "open", "draft": False, "base": {"ref": "main"},
