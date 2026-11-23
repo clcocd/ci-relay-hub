@@ -119,6 +119,12 @@ jobs:
               output.write(f"gradle_action={gradle_action}\n")
           PY
 
+      - name: Install JDK 22 for the Gradle toolchain
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '22'
+
       - name: Set up PR-selected JDK
         uses: actions/setup-java@v6
         with:
