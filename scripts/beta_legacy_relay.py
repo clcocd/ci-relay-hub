@@ -37,8 +37,17 @@ def api(path: str, *, method: str = "GET", payload=None, token_env="BETA_CI_TOKE
         data = json.dumps(payload).encode("utf-8")
         headers["Content-Type"] = "application/json"
     request = urllib.request.Request(API + path, data=data, headers=headers, method=method)
-    with urllib.request.urlopen(request, timeout=30) as response:
-        return None if response.status == 204 else json.load(response)
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return None if response.status == 204 else json.load(response)
+    except urllib.error.HTTPError as exc:
+        body = exc.read(2048).decode("utf-8", errors="replace")
+        try:
+            message = json.loads(body).get("message", "")
+        except (ValueError, AttributeError):
+            message = "GitHub returned a non-JSON error"
+        print(f"::error::GitHub API {method} {path} HTTP {exc.code}: {message}", file=sys.stderr)
+        raise
 
 
 def write_outputs(matrix):
@@ -214,7 +223,7 @@ def delete_merged_pr_branch(pr):
 
     ref = urllib.parse.quote(name, safe="/")
     try:
-        current = api(f"/repos/{REPO}/git/ref/heads/{ref}", token_env="BETA_CONTROL_TOKEN")
+        current = api(f"/repos/{REPO}/git/ref/heads/{ref}", token_env="BETA_CI_TOKEN")
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
             return
@@ -225,25 +234,22 @@ def delete_merged_pr_branch(pr):
 
     head_filter = urllib.parse.quote(f"clcocd:{name}", safe="")
     open_prs = api(f"/repos/{REPO}/pulls?state=open&head={head_filter}&per_page=100",
-                   token_env="BETA_CONTROL_TOKEN")
+                   token_env="BETA_CI_TOKEN")
     if open_prs:
         print(f"Preserving {name}: an open PR still uses this branch.")
         return
 
     api(f"/repos/{REPO}/git/refs/heads/{ref}", method="DELETE",
-        token_env="BETA_CONTROL_TOKEN")
+        token_env="BETA_CI_TOKEN")
     print(f"Deleted merged Beta PR branch: {name}")
 
 
 def cleanup():
     """Prune merged branches on authenticated PR dispatch or sweep after deployment."""
-    if not os.environ.get("BETA_CONTROL_TOKEN", "").strip():
-        print("::notice::Beta branch cleanup disabled: BETA_CONTROL_TOKEN is not configured.")
-        return
     if os.environ.get("GITHUB_EVENT_NAME") == "push":
         for page in range(1, 11):
             prs = api(f"/repos/{REPO}/pulls?state=closed&base=main&per_page=100&page={page}",
-                      token_env="BETA_CONTROL_TOKEN")
+                      token_env="BETA_CI_TOKEN")
             for pr in prs:
                 delete_merged_pr_branch(pr)
             if len(prs) < 100:
@@ -252,7 +258,7 @@ def cleanup():
 
     number = webhook_pr_number()
     if number is not None:
-        pr = api(f"/repos/{REPO}/pulls/{number}", token_env="BETA_CONTROL_TOKEN")
+        pr = api(f"/repos/{REPO}/pulls/{number}", token_env="BETA_CI_TOKEN")
         delete_merged_pr_branch(pr)
 
 
