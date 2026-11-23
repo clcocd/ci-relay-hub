@@ -165,6 +165,65 @@ class RelayTests(unittest.TestCase):
             self.assertFalse(relay.dcr_lightweight_renovate(source, number, item))
             api.assert_not_called()
 
+
+    def test_dcr_kotlin_compiler_version_only_renovate_skips_e2e(self):
+        source = relay.SOURCES["dcr"]
+        item = self.item
+        pr = {
+            "user": {"login": "renovate[bot]"},
+            "head": {"sha": item["head"], "repo": {"full_name": source["repository"]}},
+            "base": {"sha": item["base"]},
+            "changed_files": 1,
+        }
+
+        def plugin_change(old, new):
+            return [{
+                "filename": "kotlin/build.gradle.kts", "status": "modified",
+                "additions": 1, "deletions": 1,
+                "patch": (
+                    f'@@ -2 +2 @@\n-    kotlin("multiplatform") version "{old}"\n'
+                    f'+    kotlin("multiplatform") version "{new}"'
+                ),
+            }]
+
+        with patch("scripts.relay.pull", return_value=pr), \
+                patch("scripts.relay.source_api") as api:
+            for old, new in (("2.4.21", "2.4.22"), ("2.4.21", "2.5.0")):
+                with self.subTest(allowed=new):
+                    api.return_value = plugin_change(old, new)
+                    self.assertTrue(relay.dcr_lightweight_renovate(source, 121, item))
+
+            for old, new in (("2.4.21", "3.0.0"), ("2.4.21", "2.4.20"),
+                             ("2.4.21", "2.4.21"), ("2.4.21", "2.6.0-RC1")):
+                with self.subTest(rejected=new):
+                    api.return_value = plugin_change(old, new)
+                    self.assertFalse(relay.dcr_lightweight_renovate(source, 121, item))
+
+            other_change = plugin_change("2.4.21", "2.4.22")
+            other_change[0]["patch"] = (
+                '@@ -2 +2 @@\n-    id("some-plugin") version "1.0.0"\n'
+                '+    id("some-plugin") version "1.1.0"'
+            )
+            api.return_value = other_change
+            self.assertFalse(relay.dcr_lightweight_renovate(source, 121, item))
+
+            extra_line = plugin_change("2.4.21", "2.4.22")
+            extra_line[0]["additions"] = 2
+            api.return_value = extra_line
+            self.assertFalse(relay.dcr_lightweight_renovate(source, 121, item))
+
+            missing_patch = plugin_change("2.4.21", "2.4.22")
+            missing_patch[0].pop("patch")
+            api.return_value = missing_patch
+            self.assertFalse(relay.dcr_lightweight_renovate(source, 121, item))
+
+            api.return_value = plugin_change("2.4.21", "2.4.22") + [{
+                "filename": "kotlin/src/jsMain/kotlin/Example.kt",
+                "status": "modified",
+                "additions": 1, "deletions": 1,
+            }]
+            self.assertFalse(relay.dcr_lightweight_renovate(source, 121, item))
+
     def test_dcr_lightweight_ci_skips_only_browser_e2e(self):
         workflow = Path(".github/workflows/ci-relay.yml").read_text(encoding="utf-8")
         verify = workflow.split("\n  verify:\n", 1)[1].split("\n  finish:\n", 1)[0]
