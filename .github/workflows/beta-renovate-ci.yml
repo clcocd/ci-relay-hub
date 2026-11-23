@@ -22,6 +22,7 @@ jobs:
   discover:
     name: Find Beta PRs needing verification
     runs-on: ubuntu-latest
+    environment: relay-control
     outputs:
       has_work: ${{ steps.find.outputs.has_work }}
       matrix: ${{ steps.find.outputs.matrix }}
