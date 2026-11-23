@@ -1,0 +1,47 @@
+name: One-time DCR merged branch cleanup
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/dcr-branch-cleanup-once.yml']
+
+permissions: {}
+
+jobs:
+  cleanup:
+    if: github.repository == 'clcocd/ci-relay-hub'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: relay-control
+    steps:
+      - name: Delete only verified DCR branches with no unmerged work
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.DCR_CI_TOKEN }}
+        run: |
+          set -euo pipefail
+          : "${GH_TOKEN:?DCR_CI_TOKEN is required}"
+          repo=clcocd/DCR-Kotlin
+          for entry in \
+            'fix/stickyunit-runtime-style|18d31579d3be4e22120db55838405f0bcdb062eb' \
+            'fix/6.3.0-horizontal-overflow|6c94cb87f94183a9877a1f24657f9ca036992d0a'; do
+            branch=${entry%%|*}
+            expected=${entry#*|}
+            current=$(gh api "repos/$repo/git/ref/heads/$branch" --jq '.object.sha')
+            if [[ "$current" != "$expected" ]]; then
+              echo "::warning::Keeping $branch: branch changed"
+              continue
+            fi
+            open=$(gh api "repos/$repo/pulls?state=open&head=clcocd:$branch&per_page=100" --jq 'length')
+            if [[ "$open" != 0 ]]; then
+              echo "::warning::Keeping $branch: open PR exists"
+              continue
+            fi
+            ahead=$(gh api "repos/$repo/compare/main...$branch" --jq '.ahead_by')
+            if [[ "$ahead" != 0 ]]; then
+              echo "::warning::Keeping $branch: unmerged commits exist"
+              continue
+            fi
+            gh api --method DELETE "repos/$repo/git/refs/heads/$branch"
+            echo "Deleted $branch"
+          done
