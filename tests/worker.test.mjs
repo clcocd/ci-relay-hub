@@ -59,6 +59,18 @@ test("valid PR and base events are queued, unrelated and forged events are rejec
 
 });
 
+test("Worker verifies dispatch signatures without sharing its secret with GitHub Actions", async () => {
+  const env = { RELAY_DISPATCH_SECRET: dispatchKey };
+  const envelope = JSON.stringify({ source: "dcr", pr: 17, event: "ci-relay-dcr-pr" });
+  const request = (signature) => new Request("https://worker.test/verify-dispatch", {
+    method: "POST",
+    body: JSON.stringify({ envelope, signature }),
+  });
+  assert.equal((await worker.fetch(request(sign(dispatchKey, envelope)), env)).status, 204);
+  assert.equal((await worker.fetch(request(sign("wrong-secret", envelope)), env)).status, 403);
+  assert.equal((await worker.fetch(request("invalid"), env)).status, 400);
+});
+
 test("queue posts a signed dispatch and retries a GitHub outage", async (t) => {
   const env = { RELAY_DISPATCH_SECRET: dispatchKey, GITHUB_DISPATCH_TOKEN: "fixture", RELAY_REPOSITORY: "clcocd/ci-relay-hub" };
   let calls = 0;
