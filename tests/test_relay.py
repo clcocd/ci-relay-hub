@@ -99,6 +99,80 @@ class RelayTests(unittest.TestCase):
                     self.assertEqual(runner["repository"], repository)
                     self.assertEqual(runner["checkout_secret"], secret)
 
+
+    def test_dcr_lightweight_renovate_only_allows_safe_dependency_ranges(self):
+        source = relay.SOURCES["dcr"]
+        number = 115
+        item = self.item
+
+        def files(name="lucide-react", old="^1.77.0", new="^1.78.0"):
+            return [
+                {
+                    "filename": "package.json", "status": "modified",
+                    "additions": 1, "deletions": 1,
+                    "patch": f'@@ -1 +1 @@\n-    "{name}": "{old}",\n+    "{name}": "{new}",',
+                },
+                {
+                    "filename": "bun.lock", "status": "modified",
+                    "additions": 2, "deletions": 2,
+                    "patch": (
+                        f'@@ -1 +1 @@\n-    "{name}": "{old}",\n+    "{name}": "{new}",\n'
+                        f'@@ -2 +2 @@\n-    "{name}": ["{name}@{old.lstrip("^")}", "", {{}}],\n'
+                        f'+    "{name}": ["{name}@{new.lstrip("^")}", "", {{}}],'
+                    ),
+                },
+            ]
+
+        pr = {
+            "user": {"login": "renovate[bot]"},
+            "head": {"sha": item["head"], "repo": {"full_name": source["repository"]}},
+            "base": {"sha": item["base"]},
+            "changed_files": 2,
+        }
+        with patch("scripts.relay.pull", return_value=pr) as get_pr, \
+                patch("scripts.relay.source_api") as api:
+            for name in ("lucide-react", "@types/react", "@types/react-dom", "@types/bun"):
+                with self.subTest(allowed=name):
+                    api.return_value = files(name=name)
+                    self.assertTrue(relay.dcr_lightweight_renovate(source, number, item))
+
+            for name, old, new in (
+                ("preact", "^11.2.0", "^11.3.0"),
+                ("lucide-react", "^1.77.0", "^2.0.0"),
+                ("lucide-react", "^1.77.0", "^1.77.0"),
+            ):
+                with self.subTest(rejected=name, new=new):
+                    api.return_value = files(name=name, old=old, new=new)
+                    self.assertFalse(relay.dcr_lightweight_renovate(source, number, item))
+
+            additional_code = files()
+            additional_code.append({"filename": "src/entry.ts", "status": "added"})
+            api.return_value = additional_code
+            self.assertFalse(relay.dcr_lightweight_renovate(source, number, item))
+
+            suspicious_manifest = files()
+            suspicious_manifest[0]["additions"] = 2
+            api.return_value = suspicious_manifest
+            self.assertFalse(relay.dcr_lightweight_renovate(source, number, item))
+
+            missing_lock_diff = files()
+            missing_lock_diff[1].pop("patch")
+            api.return_value = missing_lock_diff
+            self.assertFalse(relay.dcr_lightweight_renovate(source, number, item))
+
+            api.reset_mock()
+            get_pr.return_value = {**pr, "user": {"login": "someone"}}
+            self.assertFalse(relay.dcr_lightweight_renovate(source, number, item))
+            api.assert_not_called()
+
+    def test_dcr_lightweight_ci_skips_only_browser_e2e(self):
+        workflow = Path(".github/workflows/ci-relay.yml").read_text(encoding="utf-8")
+        verify = workflow.split("\n  verify:\n", 1)[1].split("\n  finish:\n", 1)[0]
+        self.assertIn("name: DCR-Kotlin Kotlin, WXT, and unit checks\n        if: matrix.profile == 'dcr'", verify)
+        self.assertIn("bun run test", verify)
+        self.assertIn("bun run build:firefox", verify)
+        self.assertIn("name: DCR-Kotlin Chromium and Firefox E2E\n        if: matrix.profile == 'dcr' && !matrix.skip_e2e", verify)
+
     def test_dcr_release_uses_existing_ci_token_only_for_publishing(self):
         workflow = Path(".github/workflows/ci-relay.yml").read_text(encoding="utf-8")
         self.assertIn("\n  release_build:\n", workflow)

@@ -259,7 +259,7 @@ jobs:
           done
 
       - name: DCR-Kotlin Chromium and Firefox E2E
-        if: matrix.profile == 'dcr'
+        if: matrix.profile == 'dcr' && !matrix.skip_e2e
         shell: bash
         working-directory: source
         run: |

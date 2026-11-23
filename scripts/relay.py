@@ -255,6 +255,80 @@ def already_verified(source, item):
     return True
 
 
+# Only UI icon and compile-time type updates may omit browser E2E.
+# A missing/truncated patch or any unrelated edit falls back to full CI.
+DCR_LIGHT_PACKAGES = {"lucide-react", "@types/bun", "@types/react", "@types/react-dom"}
+
+
+def dcr_lightweight_renovate(source, number, item):
+    pr = pull(source, number)
+    head = pr.get("head") or {}
+    if (pr.get("user") or {}).get("login") != "renovate[bot]":
+        return False
+    if (pr.get("changed_files") != 2 or head.get("sha") != item["head"]
+            or (head.get("repo") or {}).get("full_name") != source["repository"]
+            or (pr.get("base") or {}).get("sha") != item["base"]):
+        return False
+
+    files = source_api(source, f"/pulls/{number}/files?per_page=100")
+    if not isinstance(files, list) or len(files) != 2:
+        return False
+    changes = {file.get("filename"): file for file in files}
+    if set(changes) != {"package.json", "bun.lock"}:
+        return False
+    if any(file.get("status") != "modified" for file in files):
+        return False
+    if (changes["package.json"].get("additions") != 1
+            or changes["package.json"].get("deletions") != 1
+            or changes["bun.lock"].get("additions") != 2
+            or changes["bun.lock"].get("deletions") != 2):
+        return False
+
+    def edited_lines(file):
+        patch = file.get("patch")
+        if not isinstance(patch, str):
+            return None
+        lines = patch.splitlines()
+        removed = [line[1:].strip() for line in lines
+                   if line.startswith("-") and not line.startswith("---")]
+        added = [line[1:].strip() for line in lines
+                 if line.startswith("+") and not line.startswith("+++")]
+        return removed, added
+
+    manifest = edited_lines(changes["package.json"])
+    lock = edited_lines(changes["bun.lock"])
+    if not manifest or not lock or len(manifest[0]) != 1 or len(manifest[1]) != 1:
+        return False
+    if len(lock[0]) != 2 or len(lock[1]) != 2:
+        return False
+
+    def dependency(line):
+        match = re.fullmatch(r'"([^"]+)":\s*"(\^?\d+\.\d+\.\d+)",?', line)
+        return match.groups() if match else None
+
+    before = dependency(manifest[0][0])
+    after = dependency(manifest[1][0])
+    if not before or not after or before[0] != after[0] or before[0] not in DCR_LIGHT_PACKAGES:
+        return False
+    name, old = before
+    new = after[1]
+    if old.startswith("^") != new.startswith("^"):
+        return False
+    old_version = tuple(map(int, old.lstrip("^").split(".")))
+    new_version = tuple(map(int, new.lstrip("^").split(".")))
+    if (new_version <= old_version or new_version[0] != old_version[0]
+            or (old_version[0] == 0 and new_version[1] != old_version[1])):
+        return False
+
+    def lock_matches(lines, spec):
+        # Require both the workspace range and the resolved package to change.
+        return (any(line.startswith(f'"{name}": "{spec}"') for line in lines)
+                and any(line.startswith(f'"{name}": ["{name}@{spec.lstrip("^")}"')
+                        for line in lines))
+
+    return lock_matches(lock[0], old) and lock_matches(lock[1], new)
+
+
 def prepare():
     data = event_data()
     source = require_enrolled(data["source"])
@@ -275,8 +349,12 @@ def prepare():
         status(source, item, "error", "merge snapshot unavailable")
         raise RuntimeError("GitHub did not compute a current merge snapshot")
     status(source, item, "pending", "verifying")
+    light_dcr = data["source"] == "dcr" and dcr_lightweight_renovate(source, data["pr"], item)
+    if light_dcr:
+        print("Lightweight CI: verified low-risk Renovate dependency-only PR (E2E skipped).")
     runners = [
-        {**runner, "repository": source["repository"], "checkout_secret": source["read_token"]}
+        {**runner, "repository": source["repository"], "checkout_secret": source["read_token"],
+         "skip_e2e": light_dcr if runner["profile"] == "dcr" else False}
         for runner in source["runners"]
     ]
     emit("matrix", json.dumps({"include": runners}, separators=(",", ":")))
