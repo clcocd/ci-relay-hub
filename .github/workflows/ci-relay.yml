@@ -1,0 +1,469 @@
+name: Webhook CI relay
+
+on:
+  repository_dispatch:
+    types: [ci-relay-pr, ci-relay-base, ci-relay-dcr-pr, ci-relay-dcr-base]
+
+permissions: {}
+
+# A replacement pending run always rereads the latest PR.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.client_payload.key || github.run_id }}
+  cancel-in-progress: false
+
+env:
+  CI_RELAY_PUBLIC_SOURCE: ${{ vars.CI_RELAY_PUBLIC_SOURCE }}
+
+jobs:
+  route:
+    if: github.ref == 'refs/heads/main' && (github.event.action == 'ci-relay-dcr-base' || (github.event.action == 'ci-relay-base' && vars.CI_RELAY_PUBLIC_SOURCE != '' && vars.CI_RELAY_BETA_V2 == 'true'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: relay-control
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - run: python3 scripts/relay.py route
+        env:
+          RELAY_DISPATCH_SECRET: ${{ secrets.RELAY_DISPATCH_SECRET }}
+          BETA_CI_TOKEN: ${{ secrets.BETA_CI_TOKEN }}
+          DCR_CI_TOKEN: ${{ secrets.DCR_CI_TOKEN }}
+          RELAY_TOKEN: ${{ github.token }}
+
+  prepare:
+    if: github.ref == 'refs/heads/main' && (github.event.action == 'ci-relay-dcr-pr' || (github.event.action == 'ci-relay-pr' && vars.CI_RELAY_PUBLIC_SOURCE != '' && vars.CI_RELAY_BETA_V2 == 'true'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    environment: relay-control
+    permissions:
+      contents: read
+    outputs:
+      pr: ${{ steps.prepare.outputs.pr }}
+      candidate: ${{ steps.prepare.outputs.candidate }}
+      matrix: ${{ steps.prepare.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - id: prepare
+        run: python3 scripts/relay.py prepare
+        env:
+          RELAY_DISPATCH_SECRET: ${{ secrets.RELAY_DISPATCH_SECRET }}
+          BETA_CI_TOKEN: ${{ secrets.BETA_CI_TOKEN }}
+          DCR_CI_TOKEN: ${{ secrets.DCR_CI_TOKEN }}
+
+  verify:
+    name: Verify private PR (${{ matrix.runner }})
+    needs: prepare
+    if: needs.prepare.outputs.pr != ''
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - name: Check out the PR directly from its private repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: ${{ matrix.repository }}
+          ref: refs/pull/${{ needs.prepare.outputs.pr }}/merge
+          token: ${{ secrets[matrix.checkout_secret] }}
+          persist-credentials: false
+          path: source
+
+      - name: Verify the checked-out PR merge commit
+        shell: bash
+        working-directory: source
+        env:
+          EXPECTED_MERGE: ${{ fromJSON(needs.prepare.outputs.candidate).merge }}
+          EXPECTED_BASE: ${{ fromJSON(needs.prepare.outputs.candidate).base }}
+          EXPECTED_HEAD: ${{ fromJSON(needs.prepare.outputs.candidate).head }}
+        run: |
+          set -euo pipefail
+          actual=$(git rev-parse HEAD)
+          parents=$(git cat-file commit "$actual" | awk 'BEGIN { header=1 } /^$/ { header=0 } header && $1=="parent" { print $2 }')
+          if [[ "$actual" != "$EXPECTED_MERGE" || "$parents" != "$EXPECTED_BASE"$'\n'"$EXPECTED_HEAD" ]]; then
+            echo "::error::PR merge ref no longer matches the selected base and head"
+            exit 1
+          fi
+          if git ls-tree -r HEAD | grep '^160000 ' >/dev/null; then
+            echo "::error::This source uses submodules, which require an explicit build profile"
+            exit 1
+          fi
+
+      - name: Read PR-specific CI dependency versions
+        if: matrix.profile == 'beta'
+        id: versions
+        shell: bash
+        working-directory: source
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          source = Path(".github/workflows/dependency-verification.yml").read_text(encoding="utf-8")
+
+          def find(pattern, label):
+              matches = re.findall(pattern, source, re.MULTILINE)
+              if len(matches) != 1:
+                  raise ValueError(f"Expected exactly one {label} value, got {matches!r}")
+              return matches[0]
+
+          checkout = find(r'^\s*uses:\s*actions/checkout@(v\d+)\s*$', "checkout version")
+          java_action = find(r'^\s*uses:\s*actions/setup-java@(v\d+)\s*$', "setup-java version")
+          jdk = find(r'^\s*java-version:\s*[\x27\x22]?(\d+)[\x27\x22]?\s*$', "JDK version")
+          gradle_action = find(r'^\s*uses:\s*gradle/actions/setup-gradle@(v\d+)\s*$', "setup-gradle version")
+          if checkout != "v7" or java_action != "v6":
+              raise ValueError(f"Unsupported checkout/setup-java action: {checkout}/{java_action}")
+          if not (17 <= int(jdk) <= 30):
+              raise ValueError(f"Unsupported JDK version: {jdk}")
+          if gradle_action not in ("v4", "v6"):
+              raise ValueError(f"Unsupported setup-gradle action: {gradle_action}")
+
+          print(f"PR CI: checkout {checkout}, Java action {java_action}, JDK {jdk}, Gradle action {gradle_action}")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"jdk={jdk}\n")
+              output.write(f"gradle_action={gradle_action}\n")
+          PY
+
+      - name: Set up PR-selected JDK
+        if: matrix.profile == 'beta'
+        uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6
+        with:
+          distribution: temurin
+          java-version: ${{ steps.versions.outputs.jdk }}
+
+      - name: Set up Gradle v4 (when PR selects v4)
+        if: matrix.profile == 'beta' && steps.versions.outputs.gradle_action == 'v4'
+        uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4
+        with:
+          cache-disabled: true
+
+      - name: Set up Gradle v6 (when PR selects v6)
+        if: matrix.profile == 'beta' && steps.versions.outputs.gradle_action == 'v6'
+        uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6
+        with:
+          cache-disabled: true
+
+      - name: Install locally maintained KotlinInside JAR
+        if: matrix.profile == 'beta'
+        shell: bash
+        working-directory: source
+        run: |
+          set -euo pipefail
+          artifact=".github/kotlininside-2.0.1.jar"
+          if [[ ! -f "$artifact" ]]; then
+            echo "::error::Required KotlinInside 2.0.1 JAR is missing."
+            exit 1
+          fi
+          maven_dir="$HOME/.m2/repository/dev/kotlininside/kotlininside/2.0.1"
+          mkdir -p "$maven_dir"
+          cp "$artifact" "$maven_dir/kotlininside-2.0.1.jar"
+          cat > "$maven_dir/kotlininside-2.0.1.pom" <<'POM'
+          <project xmlns="http://maven.apache.org/POM/4.0.0">
+            <modelVersion>4.0.0</modelVersion>
+            <groupId>dev.kotlininside</groupId>
+            <artifactId>kotlininside</artifactId>
+            <version>2.0.1</version>
+            <dependencies>
+              <dependency>
+                <groupId>com.squareup.okhttp3</groupId>
+                <artifactId>okhttp</artifactId>
+                <version>4.12.0</version>
+              </dependency>
+            </dependencies>
+          </project>
+          POM
+
+      - name: Run desktop tests and compile app (macOS)
+        if: matrix.profile == 'beta' && runner.os == 'macOS'
+        working-directory: source
+        run: ./gradlew :composeApp:desktopTest :composeApp:jar --no-daemon
+
+      - name: Run desktop tests and compile app (Windows)
+        if: matrix.profile == 'beta' && runner.os == 'Windows'
+        working-directory: source
+        run: .\\gradlew.bat :composeApp:desktopTest :composeApp:jar --no-daemon
+
+      - name: DCR-Kotlin Bun
+        if: matrix.profile == 'dcr'
+        uses: oven-sh/setup-bun@v2
+
+      - name: DCR-Kotlin Node
+        if: matrix.profile == 'dcr'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+
+      - name: DCR-Kotlin JDK
+        if: matrix.profile == 'dcr'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: DCR-Kotlin Gradle
+        if: matrix.profile == 'dcr'
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-disabled: true
+
+      - name: DCR-Kotlin Kotlin, WXT, and unit checks
+        if: matrix.profile == 'dcr'
+        shell: bash
+        working-directory: source
+        run: |
+          set -euo pipefail
+          bun run build:kotlin
+          bun ci
+          node scripts/audit-kotlin-boundary.mjs
+          ./gradlew --no-daemon :kotlin:jsNodeTest
+          bun run compile
+          bun run test
+          bun run build
+          bun run build:firefox
+          test -s generated/dcr-kotlin.mjs
+          for browser in chrome firefox; do
+            directory=".output/$browser-mv3"
+            test -s "$directory/manifest.json"
+            test -s "$directory/page-runtime.js"
+            grep -R -F -q '__DCR_KOTLIN__' "$directory"
+          done
+
+      - name: DCR-Kotlin Chromium and Firefox E2E
+        if: matrix.profile == 'dcr'
+        shell: bash
+        working-directory: source
+        run: |
+          set -euo pipefail
+          bunx playwright install --with-deps chromium firefox
+          for browser in chromium firefox; do
+            set +e
+            bunx playwright test --project="$browser" --workers=1 --reporter=json > "$RUNNER_TEMP/$browser-e2e.json"
+            test_exit=$?
+            set -e
+            test -s "$RUNNER_TEMP/$browser-e2e.json"
+            if [[ "$browser" == firefox ]]; then
+              node scripts/verify-e2e-baseline.mjs "$RUNNER_TEMP/$browser-e2e.json" firefox
+            else
+              node scripts/verify-e2e-baseline.mjs "$RUNNER_TEMP/$browser-e2e.json"
+            fi
+            if [[ "$test_exit" != 0 ]]; then
+              echo "::notice::$browser E2E returned baseline failures; regression verifier decides pass/fail"
+            fi
+          done
+          bunx playwright test e2e/preview.spec.ts --project=firefox --grep "받는 중에 넘기거나 닫아 끊은 요청은 콘솔에 오류를 남기지 않는다"
+          bunx playwright test e2e/live/dcinside.spec.ts --project=live --workers=1
+
+  finish:
+    needs: [prepare, verify]
+    if: always() && needs.prepare.outputs.candidate != '' && fromJSON(needs.prepare.outputs.candidate).merge != null
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    environment: relay-control
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - run: python3 scripts/relay.py finish
+        env:
+          CANDIDATE: ${{ needs.prepare.outputs.candidate }}
+          PREPARE_RESULT: ${{ needs.prepare.result }}
+          BUILD_RESULT: ${{ needs.verify.result }}
+          RELAY_DISPATCH_SECRET: ${{ secrets.RELAY_DISPATCH_SECRET }}
+          BETA_CI_TOKEN: ${{ secrets.BETA_CI_TOKEN }}
+          DCR_CI_TOKEN: ${{ secrets.DCR_CI_TOKEN }}
+          BETA_CONTROL_TOKEN: ${{ secrets.BETA_CONTROL_TOKEN }}
+
+  # The release belongs to the private DCR repository. No release ZIP is uploaded
+  # as a ci-relay artifact or pushed to ci-relay branches.
+  release_build:
+    name: DCR-Kotlin private release build
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      github.event.action == 'ci-relay-dcr-base' &&
+      vars.CI_RELAY_PUBLIC_SOURCE != 'off'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: relay-control
+    permissions:
+      contents: read
+    outputs:
+      publish: ${{ steps.gate.outputs.publish }}
+      source_sha: ${{ steps.gate.outputs.source_sha }}
+      version: ${{ steps.gate.outputs.version }}
+      tag: ${{ steps.gate.outputs.tag }}
+      artifact_id: ${{ steps.artifact.outputs.artifact-id }}
+    steps:
+      - name: Check out trusted hub control code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Authenticate DCR push and decide whether version is unpublished
+        id: gate
+        env:
+          RELAY_DISPATCH_SECRET: ${{ secrets.RELAY_DISPATCH_SECRET }}
+          DCR_CI_TOKEN: ${{ secrets.DCR_CI_TOKEN }}
+        run: python3 scripts/relay.py release-gate
+
+      - name: Check out exact private DCR main commit
+        if: steps.gate.outputs.publish == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: clcocd/DCR-Kotlin
+          ref: ${{ steps.gate.outputs.source_sha }}
+          path: dcr
+          fetch-depth: 1
+          persist-credentials: false
+          token: ${{ secrets.DCR_CI_TOKEN }}
+
+      - name: Verify checkout identity
+        if: steps.gate.outputs.publish == 'true'
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.gate.outputs.source_sha }}
+        run: test "$(git -C dcr rev-parse HEAD)" = "$SOURCE_SHA"
+
+      - name: Install Bun
+        if: steps.gate.outputs.publish == 'true'
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install Node
+        if: steps.gate.outputs.publish == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+
+      - name: Install JDK
+        if: steps.gate.outputs.publish == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install Gradle
+        if: steps.gate.outputs.publish == 'true'
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-disabled: true
+
+      - name: Build, test, and package private DCR release
+        if: steps.gate.outputs.publish == 'true'
+        working-directory: dcr
+        shell: bash
+        env:
+          VERSION: ${{ steps.gate.outputs.version }}
+        run: |
+          set -euo pipefail
+          bun run build:kotlin
+          bun ci
+          ./gradlew --no-daemon :kotlin:jsNodeTest
+          bun run compile
+          bun run test
+          bun run build
+          bun run build:firefox
+          test -s generated/dcr-kotlin.mjs
+          for browser in chrome firefox; do
+            directory=".output/$browser-mv3"
+            test -s "$directory/manifest.json"
+            test -s "$directory/page-runtime.js"
+            grep -R -F -q '__DCR_KOTLIN__' "$directory"
+            jq -e --arg version "$VERSION" '.version == $version' "$directory/manifest.json"
+            if [[ "$browser" == chrome ]]; then
+              file="DCR-Kotlin-$VERSION-Chrome.zip"
+            else
+              file="DCR-Kotlin-$VERSION-Firefox.zip"
+            fi
+            (cd "$directory" && zip -qr "../$file" .)
+            unzip -tqq ".output/$file"
+          done
+          (cd .output && sha256sum "DCR-Kotlin-$VERSION-Chrome.zip" "DCR-Kotlin-$VERSION-Firefox.zip" > SHA256SUMS.txt)
+      - name: Transfer packages to isolated publish runner
+        if: steps.gate.outputs.publish == 'true'
+        id: artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dcr-release-assets
+          path: |
+            dcr/.output/DCR-Kotlin-${{ steps.gate.outputs.version }}-Chrome.zip
+            dcr/.output/DCR-Kotlin-${{ steps.gate.outputs.version }}-Firefox.zip
+            dcr/.output/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 1
+
+  release_publish:
+    name: Publish to private DCR-Kotlin repository
+    needs: release_build
+    if: needs.release_build.result == 'success' && needs.release_build.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: relay-control
+    permissions:
+      contents: read
+      actions: write
+    concurrency:
+      group: dcr-private-release
+      cancel-in-progress: false
+    steps:
+      - name: Check out trusted hub control code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Download tested packages to a clean publish runner
+        uses: actions/download-artifact@v4
+        with:
+          name: dcr-release-assets
+          path: release-assets
+
+      - name: Verify package checksums
+        working-directory: release-assets
+        run: sha256sum -c SHA256SUMS.txt
+
+      - name: Recheck main SHA and release tag before publishing
+        env:
+          RELAY_DISPATCH_SECRET: ${{ secrets.RELAY_DISPATCH_SECRET }}
+          DCR_CI_TOKEN: ${{ secrets.DCR_CI_TOKEN }}
+          SOURCE_SHA: ${{ needs.release_build.outputs.source_sha }}
+          RELEASE_VERSION: ${{ needs.release_build.outputs.version }}
+          RELEASE_TAG: ${{ needs.release_build.outputs.tag }}
+        run: python3 scripts/relay.py release-verify
+
+      - name: Publish GitHub Release in private DCR-Kotlin only
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.DCR_CI_TOKEN }}
+          SOURCE_SHA: ${{ needs.release_build.outputs.source_sha }}
+          VERSION: ${{ needs.release_build.outputs.version }}
+          TAG: ${{ needs.release_build.outputs.tag }}
+        run: |
+          set -euo pipefail
+          test -n "$GH_TOKEN"
+          printf '# DCR-Kotlin %s 통합 테스트\n\nKotlin/JS·WXT Chrome 및 Firefox 테스트용 프리릴리스입니다.\n정식 버전이 아니며 원본 저장소의 main 커밋에서 빌드했습니다.\n' "$VERSION" > "$RUNNER_TEMP/dcr-release-notes.md"
+          gh release create "$TAG" \
+            "release-assets/DCR-Kotlin-$VERSION-Chrome.zip" \
+            "release-assets/DCR-Kotlin-$VERSION-Firefox.zip" \
+            release-assets/SHA256SUMS.txt \
+            --repo clcocd/DCR-Kotlin \
+            --target "$SOURCE_SHA" \
+            --title "DCR-Kotlin $VERSION 통합 테스트" \
+            --notes-file "$RUNNER_TEMP/dcr-release-notes.md" \
+            --prerelease
+
+      - name: Delete temporary public CI artifact
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ needs.release_build.outputs.artifact_id }}
+        shell: bash
+        run: |
+          if [[ -n "$ARTIFACT_ID" ]]; then
+            gh api --method DELETE "repos/${GITHUB_REPOSITORY}/actions/artifacts/$ARTIFACT_ID"
+          fi

@@ -1,0 +1,188 @@
+name: Beta PR CI relay
+
+on:
+  repository_dispatch:
+    types: [ci-relay-pr, ci-relay-base]
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Recheck already tested PRs'
+        type: boolean
+        default: false
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: beta-relay-${{ github.event.client_payload.key || 'all' }}
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    name: Find Beta PRs needing verification
+    runs-on: ubuntu-latest
+    outputs:
+      has_work: ${{ steps.find.outputs.has_work }}
+      matrix: ${{ steps.find.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Discover and check current PR statuses
+        id: find
+        env:
+          BETA_CI_TOKEN: ${{ secrets.BETA_CI_TOKEN }}
+          RELAY_DISPATCH_SECRET: ${{ secrets.RELAY_DISPATCH_SECRET }}
+          FORCE: ${{ inputs.force || 'false' }}
+        run: python3 scripts/beta_legacy_relay.py discover
+
+  verify:
+    name: PR #${{ matrix.pr }} / ${{ matrix.platform }}
+    needs: discover
+    if: needs.discover.outputs.has_work == 'true'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.discover.outputs.matrix) }}
+    steps:
+      - name: Checkout relay utilities
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set pending status on Beta PR
+        id: status_start
+        env:
+          BETA_CI_TOKEN: ${{ secrets.BETA_CI_TOKEN }}
+          PR_SHA: ${{ matrix.sha }}
+          MERGE_SHA: ${{ matrix.merge_sha }}
+          PR_NUMBER: ${{ matrix.pr }}
+          STATUS_CONTEXT: ${{ matrix.context }}
+          PHASE: start
+        run: python3 scripts/beta_legacy_relay.py report
+
+      - name: Checkout private Beta PR merge snapshot (ephemeral only)
+        uses: actions/checkout@v7
+        with:
+          repository: clcocd/GallFlowProject-Beta
+          ref: refs/pull/${{ matrix.pr }}/merge
+          path: beta
+          fetch-depth: 1
+          persist-credentials: false
+          token: ${{ secrets.BETA_CI_TOKEN }}
+
+      - name: Ensure checked-out merge snapshot matches discovery
+        shell: bash
+        env:
+          EXPECTED_MERGE_SHA: ${{ matrix.merge_sha }}
+        run: |
+          set -euo pipefail
+          actual="$(git -C beta rev-parse HEAD)"
+          if [[ "$actual" != "$EXPECTED_MERGE_SHA" ]]; then
+            echo "::error::PR merge snapshot changed during verification; the latest webhook will verify the new head."
+            exit 1
+          fi
+
+      - name: Read PR-specific CI dependency versions
+        id: versions
+        shell: bash
+        working-directory: beta
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          source = Path(".github/workflows/dependency-verification.yml").read_text(encoding="utf-8")
+
+          def find(pattern, label):
+              matches = re.findall(pattern, source, re.MULTILINE)
+              if len(matches) != 1:
+                  raise ValueError(f"Expected exactly one {label} value, got {matches!r}")
+              return matches[0]
+
+          checkout = find(r'^\s*uses:\s*actions/checkout@(v\d+)\s*$', "checkout version")
+          java_action = find(r'^\s*uses:\s*actions/setup-java@(v\d+)\s*$', "setup-java version")
+          jdk = find(r'^\s*java-version:\s*[\x27\x22]?(\d+)[\x27\x22]?\s*$', "JDK version")
+          gradle_action = find(r'^\s*uses:\s*gradle/actions/setup-gradle@(v\d+)\s*$', "setup-gradle version")
+          if checkout != "v7" or java_action != "v6":
+              raise ValueError(f"Unsupported checkout/setup-java action: {checkout}/{java_action}")
+          if not (17 <= int(jdk) <= 30):
+              raise ValueError(f"Unsupported JDK version: {jdk}")
+          if gradle_action not in ("v4", "v6"):
+              raise ValueError(f"Unsupported setup-gradle action: {gradle_action}")
+
+          print(f"PR CI: checkout {checkout}, Java action {java_action}, JDK {jdk}, Gradle action {gradle_action}")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"jdk={jdk}\n")
+              output.write(f"gradle_action={gradle_action}\n")
+          PY
+
+      - name: Set up PR-selected JDK
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: ${{ steps.versions.outputs.jdk }}
+
+      - name: Set up Gradle v4 (when PR selects v4)
+        if: steps.versions.outputs.gradle_action == 'v4'
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-disabled: true
+
+      - name: Set up Gradle v6 (when PR selects v6)
+        if: steps.versions.outputs.gradle_action == 'v6'
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-disabled: true
+
+      - name: Install locally maintained KotlinInside JAR
+        shell: bash
+        working-directory: beta
+        run: |
+          set -euo pipefail
+          artifact=".github/kotlininside-2.0.1.jar"
+          if [[ ! -f "$artifact" ]]; then
+            echo "::error::Required KotlinInside 2.0.1 JAR is missing."
+            exit 1
+          fi
+          maven_dir="$HOME/.m2/repository/dev/kotlininside/kotlininside/2.0.1"
+          mkdir -p "$maven_dir"
+          cp "$artifact" "$maven_dir/kotlininside-2.0.1.jar"
+          cat > "$maven_dir/kotlininside-2.0.1.pom" <<'POM'
+          <project xmlns="http://maven.apache.org/POM/4.0.0">
+            <modelVersion>4.0.0</modelVersion>
+            <groupId>dev.kotlininside</groupId>
+            <artifactId>kotlininside</artifactId>
+            <version>2.0.1</version>
+            <dependencies>
+              <dependency>
+                <groupId>com.squareup.okhttp3</groupId>
+                <artifactId>okhttp</artifactId>
+                <version>4.12.0</version>
+              </dependency>
+            </dependencies>
+          </project>
+          POM
+
+      - name: Run desktop tests and compile app (macOS)
+        if: runner.os == 'macOS'
+        working-directory: beta
+        run: ./gradlew :composeApp:desktopTest :composeApp:jar --no-daemon
+
+      - name: Run desktop tests and compile app (Windows)
+        if: runner.os == 'Windows'
+        working-directory: beta
+        run: .\\gradlew.bat :composeApp:desktopTest :composeApp:jar --no-daemon
+
+      - name: Return final status to private Beta PR
+        if: ${{ always() && steps.status_start.outcome == 'success' }}
+        env:
+          BETA_CI_TOKEN: ${{ secrets.BETA_CI_TOKEN }}
+          PR_SHA: ${{ matrix.sha }}
+          MERGE_SHA: ${{ matrix.merge_sha }}
+          PR_NUMBER: ${{ matrix.pr }}
+          STATUS_CONTEXT: ${{ matrix.context }}
+          PHASE: finish
+          JOB_RESULT: ${{ job.status }}
+        run: python3 scripts/beta_legacy_relay.py report

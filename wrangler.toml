@@ -1,0 +1,21 @@
+name = "ci-relay-webhook"
+main = "worker/index.mjs"
+compatibility_date = "2026-11-22"
+
+[vars]
+RELAY_REPOSITORY = "clcocd/ci-relay-hub"
+SOURCES = '{"1432951415":{"alias":"beta","repository":"clcocd/GallFlowProject-Beta","branch":"main"},"1464038807":{"alias":"dcr","repository":"clcocd/DCR-Kotlin","branch":"main","path":"/github/dcr-kotlin"}}'
+
+[observability]
+enabled = true
+
+[[queues.producers]]
+binding = "RELAY_QUEUE"
+queue = "ci-relay-webhooks"
+
+[[queues.consumers]]
+queue = "ci-relay-webhooks"
+max_batch_size = 5
+max_batch_timeout = 1
+max_retries = 8
+dead_letter_queue = "ci-relay-webhooks-failed"
