@@ -13,8 +13,9 @@ class RelayTests(unittest.TestCase):
         self.source = relay.SOURCES["beta"]
         self.item = {"head": "a" * 40, "base": "b" * 40, "merge": "c" * 40, "conflict": False}
 
+    @patch("scripts.relay.verified_by_worker", return_value=False)
     @patch.dict(os.environ, {"RELAY_DISPATCH_SECRET": "local-fixture-key" * 4})
-    def test_dispatch_is_bound_to_type_number_and_concurrency_key(self):
+    def test_dispatch_is_bound_to_type_number_and_concurrency_key(self, verify):
         envelope = json.dumps({
             "source": "beta", "pr": 21, "event": "ci-relay-pr",
             "delivery": "f" * 36, "issued": int(time.time()),
@@ -50,6 +51,22 @@ class RelayTests(unittest.TestCase):
         event["action"] = "ci-relay-pr"
         with self.assertRaises(ValueError):
             relay.authenticate(event)
+
+    @patch("scripts.relay.verified_by_worker", return_value=True)
+    @patch.dict(os.environ, {"RELAY_DISPATCH_SECRET": "local-fixture-key" * 4})
+    def test_worker_signed_dispatch_uses_remote_verification(self, verify):
+        envelope = json.dumps({
+            "source": "dcr", "pr": 44, "event": "ci-relay-dcr-pr",
+            "delivery": "f" * 36, "issued": int(time.time()),
+        })
+        event = {
+            "action": "ci-relay-dcr-pr",
+            "client_payload": {
+                "envelope": envelope, "signature": "0" * 64, "key": "dcr-44",
+            },
+        }
+        self.assertEqual(relay.authenticate(event)["pr"], 44)
+        verify.assert_called_once_with(envelope, "0" * 64)
 
     @patch.dict(os.environ, {
         "RELAY_DISPATCH_SECRET": "local-fixture-key" * 4,
