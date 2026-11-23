@@ -420,7 +420,7 @@ class RelayTests(unittest.TestCase):
         workflow = Path(".github/workflows/beta-renovate-ci.yml").read_text(encoding="utf-8")
         self.assertIn("paths: ['.github/workflows/beta-renovate-ci.yml']", workflow)
         self.assertIn("python3 scripts/beta_legacy_relay.py cleanup", workflow)
-        self.assertIn("BETA_CONTROL_TOKEN: ${{ secrets.BETA_CONTROL_TOKEN || secrets.BETA_CI_TOKEN }}", workflow)
+        self.assertIn("BETA_CONTROL_TOKEN: ${{ secrets.BETA_CONTROL_TOKEN }}", workflow)
         self.assertIn("if: github.event_name != 'push'", workflow)
         self.assertIn("environment: relay-control", workflow)
 
