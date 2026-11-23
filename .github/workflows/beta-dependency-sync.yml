@@ -1,0 +1,30 @@
+name: Promote verified Beta dependency versions
+
+on:
+  repository_dispatch:
+    types: [ci-relay-pr]
+
+permissions:
+  contents: read
+
+# One candidate at a time; duplicate merged-PR deliveries become idempotent.
+concurrency:
+  group: beta-dependency-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    environment: relay-control
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Sync verified, merged Renovate dependency changes to stable
+        run: python3 scripts/sync_beta_dependencies.py
+        env:
+          RELAY_DISPATCH_SECRET: ${{ secrets.RELAY_DISPATCH_SECRET }}
+          BETA_CI_TOKEN: ${{ secrets.BETA_CI_TOKEN }}
+          RELEASE_SYNC_TOKEN: ${{ secrets.RELEASE_SYNC_TOKEN }}
