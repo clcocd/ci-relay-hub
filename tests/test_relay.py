@@ -372,7 +372,7 @@ class RelayTests(unittest.TestCase):
             self.assertEqual(api.call_args.args,
                              ("/repos/clcocd/GallFlowProject-Beta/git/refs/heads/renovate/major-java",))
             self.assertEqual(api.call_args.kwargs,
-                             {"method": "DELETE", "token_env": "BETA_CONTROL_TOKEN"})
+                             {"method": "DELETE", "token_env": "BETA_CI_TOKEN"})
 
     def test_beta_cleanup_preserves_unmerged_default_fork_and_changed_branch(self):
         from scripts import beta_legacy_relay as beta
@@ -403,7 +403,7 @@ class RelayTests(unittest.TestCase):
             beta.delete_merged_pr_branch(pr)
             self.assertEqual(api.call_count, 2)
 
-    @patch.dict(os.environ, {"GITHUB_EVENT_NAME": "repository_dispatch", "BETA_CONTROL_TOKEN": "test-token"})
+    @patch.dict(os.environ, {"GITHUB_EVENT_NAME": "repository_dispatch", "BETA_CI_TOKEN": "test-token"})
     @patch("scripts.beta_legacy_relay.webhook_pr_number", return_value=16)
     @patch("scripts.beta_legacy_relay.api", return_value={"state": "closed", "merged_at": None})
     @patch("scripts.beta_legacy_relay.delete_merged_pr_branch")
@@ -413,14 +413,14 @@ class RelayTests(unittest.TestCase):
         beta.cleanup()
         signed_number.assert_called_once()
         api.assert_called_once_with("/repos/clcocd/GallFlowProject-Beta/pulls/16",
-                                    token_env="BETA_CONTROL_TOKEN")
+                                    token_env="BETA_CI_TOKEN")
         delete.assert_called_once()
 
     def test_beta_cleanup_workflow_runs_on_public_hub(self):
         workflow = Path(".github/workflows/beta-renovate-ci.yml").read_text(encoding="utf-8")
         self.assertIn("paths: ['.github/workflows/beta-renovate-ci.yml']", workflow)
         self.assertIn("python3 scripts/beta_legacy_relay.py cleanup", workflow)
-        self.assertIn("BETA_CONTROL_TOKEN: ${{ secrets.BETA_CONTROL_TOKEN }}", workflow)
+        self.assertIn("BETA_CI_TOKEN: ${{ secrets.BETA_CI_TOKEN }}", workflow)
         self.assertIn("if: github.event_name != 'push'", workflow)
         self.assertIn("environment: relay-control", workflow)
 
