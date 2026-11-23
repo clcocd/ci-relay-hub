@@ -12,6 +12,7 @@ import os
 import re
 import sys
 import time
+import urllib.parse
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -22,10 +23,10 @@ PLATFORMS = {"macOS": "macos-15", "Windows": "windows-latest"}
 PENDING_TTL = dt.timedelta(hours=2)
 
 
-def api(path: str, *, method: str = "GET", payload=None):
-    token = os.environ.get("BETA_CI_TOKEN", "").strip()
+def api(path: str, *, method: str = "GET", payload=None, token_env="BETA_CI_TOKEN"):
+    token = os.environ.get(token_env, "").strip()
     if not token:
-        raise RuntimeError("BETA_CI_TOKEN secret is not configured")
+        raise RuntimeError(f"{token_env} secret is not configured")
     headers = {
         "Accept": "application/vnd.github+json",
         "Authorization": f"Bearer {token}",
@@ -37,7 +38,7 @@ def api(path: str, *, method: str = "GET", payload=None):
         headers["Content-Type"] = "application/json"
     request = urllib.request.Request(API + path, data=data, headers=headers, method=method)
     with urllib.request.urlopen(request, timeout=30) as response:
-        return json.load(response)
+        return None if response.status == 204 else json.load(response)
 
 
 def write_outputs(matrix):
@@ -194,14 +195,74 @@ def report():
     print(f"PR #{pr} {context}: {state}")
 
 
+
+def delete_merged_pr_branch(pr):
+    """Delete only unchanged, unshared head branches of merged Beta PRs."""
+    if pr.get("state") != "closed" or not pr.get("merged_at"):
+        return
+    if (pr.get("base") or {}).get("ref") != "main":
+        return
+    head = pr.get("head") or {}
+    name = head.get("ref")
+    if ((head.get("repo") or {}).get("full_name") != REPO
+            or not isinstance(name, str) or not name or name == "main"
+            or not re.fullmatch(r"[A-Za-z0-9._/-]+", name)):
+        return
+    sha = head.get("sha")
+    if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha):
+        return
+
+    ref = urllib.parse.quote(name, safe="/")
+    try:
+        current = api(f"/repos/{REPO}/git/ref/heads/{ref}", token_env="BETA_CONTROL_TOKEN")
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return
+        raise
+    if current["object"]["sha"] != sha:
+        print(f"Preserving {name}: branch head changed since PR merge.")
+        return
+
+    head_filter = urllib.parse.quote(f"clcocd:{name}", safe="")
+    open_prs = api(f"/repos/{REPO}/pulls?state=open&head={head_filter}&per_page=100",
+                   token_env="BETA_CONTROL_TOKEN")
+    if open_prs:
+        print(f"Preserving {name}: an open PR still uses this branch.")
+        return
+
+    api(f"/repos/{REPO}/git/refs/heads/{ref}", method="DELETE",
+        token_env="BETA_CONTROL_TOKEN")
+    print(f"Deleted merged Beta PR branch: {name}")
+
+
+def cleanup():
+    """Prune merged branches on authenticated PR dispatch or sweep after deployment."""
+    if os.environ.get("GITHUB_EVENT_NAME") == "push":
+        for page in range(1, 11):
+            prs = api(f"/repos/{REPO}/pulls?state=closed&base=main&per_page=100&page={page}",
+                      token_env="BETA_CONTROL_TOKEN")
+            for pr in prs:
+                delete_merged_pr_branch(pr)
+            if len(prs) < 100:
+                return
+        raise RuntimeError("Exceeded merged Beta PR cleanup page limit")
+
+    number = webhook_pr_number()
+    if number is not None:
+        pr = api(f"/repos/{REPO}/pulls/{number}", token_env="BETA_CONTROL_TOKEN")
+        delete_merged_pr_branch(pr)
+
+
 if __name__ == "__main__":
     try:
         if sys.argv[1:] == ["discover"]:
             discover()
         elif sys.argv[1:] == ["report"]:
             report()
+        elif sys.argv[1:] == ["cleanup"]:
+            cleanup()
         else:
-            raise ValueError("usage: relay.py discover|report")
+            raise ValueError("usage: beta_legacy_relay.py discover|report|cleanup")
     except (urllib.error.HTTPError, urllib.error.URLError, KeyError, ValueError, RuntimeError) as exc:
         print(f"::error::CI relay failed: {exc}", file=sys.stderr)
         sys.exit(1)
