@@ -265,23 +265,16 @@ def dcr_lightweight_renovate(source, number, item):
     head = pr.get("head") or {}
     if (pr.get("user") or {}).get("login") != "renovate[bot]":
         return False
-    if (pr.get("changed_files") != 2 or head.get("sha") != item["head"]
+    if (pr.get("changed_files") not in (1, 2) or head.get("sha") != item["head"]
             or (head.get("repo") or {}).get("full_name") != source["repository"]
             or (pr.get("base") or {}).get("sha") != item["base"]):
         return False
 
     files = source_api(source, f"/pulls/{number}/files?per_page=100")
-    if not isinstance(files, list) or len(files) != 2:
+    if not isinstance(files, list) or len(files) != pr["changed_files"]:
         return False
     changes = {file.get("filename"): file for file in files}
-    if set(changes) != {"package.json", "bun.lock"}:
-        return False
     if any(file.get("status") != "modified" for file in files):
-        return False
-    if (changes["package.json"].get("additions") != 1
-            or changes["package.json"].get("deletions") != 1
-            or changes["bun.lock"].get("additions") != 2
-            or changes["bun.lock"].get("deletions") != 2):
         return False
 
     def edited_lines(file):
@@ -294,6 +287,31 @@ def dcr_lightweight_renovate(source, number, item):
         added = [line[1:].strip() for line in lines
                  if line.startswith("+") and not line.startswith("+++")]
         return removed, added
+
+
+    # Kotlin/JS compiler updates already receive Kotlin, JS, WXT and unit checks.
+    if set(changes) == {"kotlin/build.gradle.kts"}:
+        file = changes["kotlin/build.gradle.kts"]
+        edits = edited_lines(file)
+        if (file.get("additions") != 1 or file.get("deletions") != 1
+                or not edits or len(edits[0]) != 1 or len(edits[1]) != 1):
+            return False
+        pattern = r'kotlin\("multiplatform"\)\s+version\s+"(\d+\.\d+\.\d+)"'
+        old = re.fullmatch(pattern, edits[0][0])
+        new = re.fullmatch(pattern, edits[1][0])
+        if not old or not new:
+            return False
+        before = tuple(map(int, old.group(1).split(".")))
+        after = tuple(map(int, new.group(1).split(".")))
+        return after > before and after[0] == before[0]
+
+    if set(changes) != {"package.json", "bun.lock"}:
+        return False
+    if (changes["package.json"].get("additions") != 1
+            or changes["package.json"].get("deletions") != 1
+            or changes["bun.lock"].get("additions") != 2
+            or changes["bun.lock"].get("deletions") != 2):
+        return False
 
     manifest = edited_lines(changes["package.json"])
     lock = edited_lines(changes["bun.lock"])
