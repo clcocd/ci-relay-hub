@@ -218,10 +218,24 @@ jobs:
         working-directory: source
         run: |
           set -euo pipefail
-          bun run build:kotlin
+          retry_maven_429() {
+            local attempt log
+            for attempt in 1 2 3; do
+              log="$RUNNER_TEMP/dcr-gradle-attempt-$attempt.log"
+              if "$@" 2>&1 | tee "$log"; then
+                return 0
+              fi
+              if (( attempt == 3 )) || ! grep -Eqi 'Received status code 429|HTTP[^[:digit:]]*429|Too Many Requests' "$log"; then
+                return 1
+              fi
+              echo "::warning::Maven HTTP 429; retrying in $((attempt * 60)) seconds (attempt $((attempt + 1))/3)"
+              sleep "$((attempt * 60))"
+            done
+          }
+          retry_maven_429 bun run build:kotlin
           bun ci
           node scripts/audit-kotlin-boundary.mjs
-          ./gradlew --no-daemon :kotlin:jsNodeTest
+          retry_maven_429 ./gradlew --no-daemon :kotlin:jsNodeTest
           bun run compile
           bun run test
           bun run build
