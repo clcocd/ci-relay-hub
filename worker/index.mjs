@@ -98,6 +98,26 @@ async function receive(request, env) {
   return new Response(null, { status: 202 });
 }
 
+async function verifyDispatch(request, env) {
+  if (request.method !== "POST") return new Response(null, { status: 405 });
+  const body = await readBody(request);
+  if (!body) return new Response(null, { status: 413 });
+  let payload;
+  try {
+    payload = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body));
+  } catch {
+    return new Response(null, { status: 400 });
+  }
+  if (typeof payload?.envelope !== "string" || payload.envelope.length > 1024
+      || typeof payload.signature !== "string" || !/^[a-f0-9]{64}$/.test(payload.signature)) {
+    return new Response(null, { status: 400 });
+  }
+  const valid = await validSignature(
+    env.RELAY_DISPATCH_SECRET, "sha256=" + payload.signature, encoder.encode(payload.envelope),
+  );
+  return new Response(null, { status: valid ? 204 : 403, headers: { "Cache-Control": "no-store" } });
+}
+
 async function dispatch(data, env) {
   if (!env.RELAY_DISPATCH_SECRET || !env.GITHUB_DISPATCH_TOKEN ||
       !/^[a-zA-Z0-9_-]+\/[a-zA-Z0-9_.-]+$/.test(env.RELAY_REPOSITORY ?? "")) {
@@ -132,6 +152,13 @@ async function dispatch(data, env) {
 
 export default {
   async fetch(request, env) {
+    if (new URL(request.url).pathname === "/verify-dispatch") {
+      try {
+        return await verifyDispatch(request, env);
+      } catch {
+        return new Response(null, { status: 503 });
+      }
+    }
     try {
       return await receive(request, env);
     } catch {
