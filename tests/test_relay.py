@@ -331,6 +331,8 @@ class RelayTests(unittest.TestCase):
         rule["enforce_admins"]["enabled"] = False
         self.assertFalse(relay.protection_allows_relay(rule))
 
+    @patch("scripts.relay.source_api")
+    @patch("scripts.relay.matching")
     @patch("scripts.relay.require_protection")
     def test_renovate_is_never_merged_by_relay(self, protection, matching, api):
         relay.merge_or_update(self.source, 1, {"user": {"login": "renovate[bot]"}}, self.item)
