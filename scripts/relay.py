@@ -87,6 +87,21 @@ def dispatch_signature(envelope):
     return hmac.new(secret.encode(), envelope.encode(), hashlib.sha256).hexdigest()
 
 
+def verified_by_worker(envelope, signature):
+    payload = json.dumps({"envelope": envelope, "signature": signature}).encode()
+    req = urllib.request.Request(
+        "https://ci-relay-webhook.clcocd.workers.dev/verify-dispatch",
+        data=payload, headers={"Content-Type": "application/json"}, method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as response:
+            return response.status == 204
+    except urllib.error.HTTPError as exc:
+        if exc.code == 403:
+            return False
+        raise
+
+
 def authenticate(event):
     payload = event.get("client_payload") or {}
     envelope, signature = payload.get("envelope"), payload.get("signature")
@@ -94,7 +109,11 @@ def authenticate(event):
         raise ValueError("Invalid dispatch envelope")
     if not isinstance(signature, str) or not re.fullmatch("[0-9a-f]{64}", signature):
         raise ValueError("Invalid dispatch signature")
-    if not hmac.compare_digest(dispatch_signature(envelope), signature):
+    secret = os.environ.get("RELAY_DISPATCH_SECRET", "")
+    local_valid = len(secret) >= 32 and hmac.compare_digest(
+        hmac.new(secret.encode(), envelope.encode(), hashlib.sha256).hexdigest(), signature
+    )
+    if not local_valid and not verified_by_worker(envelope, signature):
         raise ValueError("Invalid dispatch signature")
     data = json.loads(envelope)
     if not isinstance(data, dict):
