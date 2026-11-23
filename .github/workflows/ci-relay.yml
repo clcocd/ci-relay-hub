@@ -1,4 +1,7 @@
 name: Webhook CI relay
+run-name: >-
+  ${{ github.event.client_payload.key && format('PR {0}', github.event.client_payload.key) || github.event.action }}
+  · 실행 #${{ github.run_number }} · 시도 ${{ github.run_attempt }}
 
 on:
   repository_dispatch:
