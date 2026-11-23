@@ -306,6 +306,27 @@ def merge_or_update(source, number, pr, item):
 
 
 
+def delete_dcr_merged_branch(source, pr, item):
+    head = pr["head"]
+    name = head.get("ref")
+    if ((head.get("repo") or {}).get("full_name") != source["repository"]
+            or not name or name == source["branch"]):
+        return
+    path = f"/git/ref/heads/{urllib.parse.quote(name, safe='/')}"
+    try:
+        current = source_api(source, path)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return
+        raise
+    if current["object"]["sha"] != item["head"]:
+        print("Skipping PR branch deletion: branch head changed.")
+        return
+    source_api(source, f"/git/refs/heads/{urllib.parse.quote(name, safe='/')}",
+               token="control", method="DELETE")
+    print(f"Deleted merged DCR PR branch: {name}")
+
+
 def merge_dcr_tested(source, number, item):
     # The tested merge commit must contain exactly the original base and head.
     # A non-forced ref update is rejected if main advanced in the meantime.
@@ -328,6 +349,7 @@ def merge_dcr_tested(source, number, item):
     if result.get("object", {}).get("sha") != item["merge"]:
         raise RuntimeError("GitHub did not advance main to the tested merge commit")
     print("Advanced DCR main to the exact tested merge commit without force.")
+    delete_dcr_merged_branch(source, pr, item)
 
 
 def finish():
