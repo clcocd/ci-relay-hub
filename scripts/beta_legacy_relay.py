@@ -237,6 +237,9 @@ def delete_merged_pr_branch(pr):
 
 def cleanup():
     """Prune merged branches on authenticated PR dispatch or sweep after deployment."""
+    if not os.environ.get("BETA_CONTROL_TOKEN", "").strip():
+        print("::notice::Beta branch cleanup disabled: BETA_CONTROL_TOKEN is not configured.")
+        return
     if os.environ.get("GITHUB_EVENT_NAME") == "push":
         for page in range(1, 11):
             prs = api(f"/repos/{REPO}/pulls?state=closed&base=main&per_page=100&page={page}",

@@ -403,7 +403,7 @@ class RelayTests(unittest.TestCase):
             beta.delete_merged_pr_branch(pr)
             self.assertEqual(api.call_count, 2)
 
-    @patch.dict(os.environ, {"GITHUB_EVENT_NAME": "repository_dispatch"})
+    @patch.dict(os.environ, {"GITHUB_EVENT_NAME": "repository_dispatch", "BETA_CONTROL_TOKEN": "test-token"})
     @patch("scripts.beta_legacy_relay.webhook_pr_number", return_value=16)
     @patch("scripts.beta_legacy_relay.api", return_value={"state": "closed", "merged_at": None})
     @patch("scripts.beta_legacy_relay.delete_merged_pr_branch")
@@ -420,7 +420,7 @@ class RelayTests(unittest.TestCase):
         workflow = Path(".github/workflows/beta-renovate-ci.yml").read_text(encoding="utf-8")
         self.assertIn("paths: ['.github/workflows/beta-renovate-ci.yml']", workflow)
         self.assertIn("python3 scripts/beta_legacy_relay.py cleanup", workflow)
-        self.assertIn("BETA_CONTROL_TOKEN: ${{ secrets.BETA_CONTROL_TOKEN || secrets.BETA_CI_TOKEN }}", workflow)
+        self.assertIn("BETA_CONTROL_TOKEN: ${{ secrets.BETA_CONTROL_TOKEN }}", workflow)
         self.assertIn("if: github.event_name != 'push'", workflow)
         self.assertIn("environment: relay-control", workflow)
 
