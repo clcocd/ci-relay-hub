@@ -41,12 +41,14 @@ def api(path: str, *, method: str = "GET", payload=None, token_env="BETA_CI_TOKE
         with urllib.request.urlopen(request, timeout=30) as response:
             return None if response.status == 204 else json.load(response)
     except urllib.error.HTTPError as exc:
-        body = exc.read(2048).decode("utf-8", errors="replace")
-        try:
-            message = json.loads(body).get("message", "")
-        except (ValueError, AttributeError):
-            message = "GitHub returned a non-JSON error"
-        print(f"::error::GitHub API {method} {path} HTTP {exc.code}: {message}", file=sys.stderr)
+        # A merged PR may already have had its branch deleted; that 404 is expected.
+        if exc.code != 404:
+            body = exc.read(2048).decode("utf-8", errors="replace")
+            try:
+                message = json.loads(body).get("message", "")
+            except (ValueError, AttributeError):
+                message = "GitHub returned a non-JSON error"
+            print(f"::error::GitHub API {method} {path} HTTP {exc.code}: {message}", file=sys.stderr)
         raise
 
 
