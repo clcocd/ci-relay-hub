@@ -403,7 +403,7 @@ class RelayTests(unittest.TestCase):
             beta.delete_merged_pr_branch(pr)
             self.assertEqual(api.call_count, 2)
 
-    @patch.dict(os.environ, {"GITHUB_EVENT_NAME": "repository_dispatch"})
+    @patch.dict(os.environ, {"GITHUB_EVENT_NAME": "repository_dispatch", "BETA_CONTROL_TOKEN": "test-token"})
     @patch("scripts.beta_legacy_relay.webhook_pr_number", return_value=16)
     @patch("scripts.beta_legacy_relay.api", return_value={"state": "closed", "merged_at": None})
     @patch("scripts.beta_legacy_relay.delete_merged_pr_branch")
