@@ -42,11 +42,11 @@ jobs:
           FORCE: ${{ inputs.force || 'false' }}
         run: python3 scripts/beta_legacy_relay.py discover
 
-      # Only the dedicated write-permission token may delete private branches.
+      # Use the existing Beta CI token and report permission failures explicitly.
       - name: Delete merged Beta PR branches
         if: github.event_name == 'push' || (github.event_name == 'repository_dispatch' && github.event.action == 'ci-relay-pr')
         env:
-          BETA_CONTROL_TOKEN: ${{ secrets.BETA_CONTROL_TOKEN }}
+          BETA_CI_TOKEN: ${{ secrets.BETA_CI_TOKEN }}
           RELAY_DISPATCH_SECRET: ${{ secrets.RELAY_DISPATCH_SECRET }}
         run: python3 scripts/beta_legacy_relay.py cleanup
 
