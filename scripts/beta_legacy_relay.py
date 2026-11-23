@@ -16,6 +16,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from relay import verified_by_worker
+
 REPO = "clcocd/GallFlowProject-Beta"
 API = "https://api.github.com"
 PLATFORMS = {"macOS": "macos-15", "Windows": "windows-latest"}
@@ -64,12 +66,14 @@ def webhook_pr_number():
     payload = event.get("client_payload") or {}
     envelope, signature = payload.get("envelope"), payload.get("signature")
     secret = os.environ.get("RELAY_DISPATCH_SECRET", "")
-    if len(secret) < 32 or not isinstance(envelope, str) or len(envelope) > 1024:
+    if not isinstance(envelope, str) or len(envelope) > 1024:
         raise ValueError("Invalid webhook dispatch envelope")
-    expected = hmac.new(secret.encode(), envelope.encode(), hashlib.sha256).hexdigest()
     if not isinstance(signature, str) or not re.fullmatch("[a-f0-9]{64}", signature):
         raise ValueError("Invalid webhook dispatch signature")
-    if not hmac.compare_digest(expected, signature):
+    local_valid = len(secret) >= 32 and hmac.compare_digest(
+        hmac.new(secret.encode(), envelope.encode(), hashlib.sha256).hexdigest(), signature
+    )
+    if not local_valid and not verified_by_worker(envelope, signature):
         raise ValueError("Invalid webhook dispatch signature")
     data = json.loads(envelope)
     if data.get("source") != "beta" or data.get("event") != event.get("action"):
