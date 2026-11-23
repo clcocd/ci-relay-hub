@@ -133,6 +133,13 @@ jobs:
               output.write(f"gradle_action={gradle_action}\n")
           PY
 
+      - name: Install JDK 22 for the Beta Gradle toolchain
+        if: matrix.profile == 'beta'
+        uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6
+        with:
+          distribution: temurin
+          java-version: '22'
+
       - name: Set up PR-selected JDK
         if: matrix.profile == 'beta'
         uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6
