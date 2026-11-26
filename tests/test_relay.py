@@ -152,8 +152,8 @@ class RelayTests(unittest.TestCase):
                     lock = changed[1]
                     lock["patch"] += ('\n@@ -3 +3,2 @@\n-    "transitive": ["transitive@1.0.0", "", {}],\n'
                                       '+    "transitive": ["transitive@1.1.0", "", {}],\n'
-                                      '+    "new-transitive": ["new-transitive@2.0.0", "", {}],')
-                    lock["additions"] += 2
+                                      '+    "new-transitive": ["new-transitive@2.0.0", "", {}],\n+')
+                    lock["additions"] += 3
                     lock["deletions"] += 1
                     api.return_value = changed
                     self.assertTrue(relay.dcr_lightweight_renovate(source, number, item))

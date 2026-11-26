@@ -336,7 +336,7 @@ def dcr_lightweight_renovate(source, number, item):
         for lines, spec in ((lock[0], old), (lock[1], new)):
             workspace = f'"{name}": "{spec}",'
             if lines.count(workspace) != 1 or any(
-                    line != workspace and not re.fullmatch(r'"[^"]+": \["[^"]+@[^"]+",.*\],?', line)
+                    line and line != workspace and not re.fullmatch(r'"[^"]+": \["[^"]+@[^"]+",.*\],?', line)
                     for line in lines):
                 return False
     elif len(lock[0]) != 2 or len(lock[1]) != 2:
