@@ -255,9 +255,10 @@ def already_verified(source, item):
     return True
 
 
-# Only UI icon and compile-time type updates may omit browser E2E.
+# Only explicitly reviewed dependency updates may omit browser E2E.
 # A missing/truncated patch or any unrelated edit falls back to full CI.
-DCR_LIGHT_PACKAGES = {"lucide-react", "@types/bun", "@types/react", "@types/react-dom"}
+DCR_LIGHT_PACKAGES = {"lucide-react", "@types/bun", "@types/react", "@types/react-dom", "shadcn", "vite"}
+DCR_TRANSITIVE_PACKAGES = {"shadcn", "vite"}
 
 
 def dcr_lightweight_renovate(source, number, item):
@@ -308,16 +309,15 @@ def dcr_lightweight_renovate(source, number, item):
     if set(changes) != {"package.json", "bun.lock"}:
         return False
     if (changes["package.json"].get("additions") != 1
-            or changes["package.json"].get("deletions") != 1
-            or changes["bun.lock"].get("additions") != 2
-            or changes["bun.lock"].get("deletions") != 2):
+            or changes["package.json"].get("deletions") != 1):
         return False
 
     manifest = edited_lines(changes["package.json"])
     lock = edited_lines(changes["bun.lock"])
     if not manifest or not lock or len(manifest[0]) != 1 or len(manifest[1]) != 1:
         return False
-    if len(lock[0]) != 2 or len(lock[1]) != 2:
+    if (len(lock[0]) != changes["bun.lock"].get("deletions")
+            or len(lock[1]) != changes["bun.lock"].get("additions")):
         return False
 
     def dependency(line):
@@ -330,6 +330,17 @@ def dcr_lightweight_renovate(source, number, item):
         return False
     name, old = before
     new = after[1]
+    if name in DCR_TRANSITIVE_PACKAGES:
+        # Bun may also update resolved transitive package entries, but not other
+        # workspace dependency ranges or arbitrary lockfile metadata.
+        for lines, spec in ((lock[0], old), (lock[1], new)):
+            workspace = f'"{name}": "{spec}",'
+            if lines.count(workspace) != 1 or any(
+                    line and line != workspace and not re.fullmatch(r'"[^"]+": \["[^"]+@[^"]+",.*\],?', line)
+                    for line in lines):
+                return False
+    elif len(lock[0]) != 2 or len(lock[1]) != 2:
+        return False
     if old.startswith("^") != new.startswith("^"):
         return False
     old_version = tuple(map(int, old.lstrip("^").split(".")))

@@ -145,6 +145,25 @@ class RelayTests(unittest.TestCase):
                     api.return_value = files(name=name, old=old, new=new)
                     self.assertFalse(relay.dcr_lightweight_renovate(source, number, item))
 
+            for name, old, new in (("shadcn", "^4.23.0", "^4.23.1"),
+                                   ("vite", "^8.3.8", "^8.4.0")):
+                with self.subTest(transitive=name):
+                    changed = files(name=name, old=old, new=new)
+                    lock = changed[1]
+                    lock["patch"] += ('\n@@ -3 +3,2 @@\n-    "transitive": ["transitive@1.0.0", "", {}],\n'
+                                      '+    "transitive": ["transitive@1.1.0", "", {}],\n'
+                                      '+    "new-transitive": ["new-transitive@2.0.0", "", {}],\n+')
+                    lock["additions"] += 3
+                    lock["deletions"] += 1
+                    api.return_value = changed
+                    self.assertTrue(relay.dcr_lightweight_renovate(source, number, item))
+                    lock["additions"] += 1
+                    self.assertFalse(relay.dcr_lightweight_renovate(source, number, item))
+                    lock["patch"] += '\n+    "unrelated": "^9.0.0",'
+                    self.assertFalse(relay.dcr_lightweight_renovate(source, number, item))
+                    api.return_value = files(name=name, old=old, new="^99.0.0")
+                    self.assertFalse(relay.dcr_lightweight_renovate(source, number, item))
+
             additional_code = files()
             additional_code.append({"filename": "src/entry.ts", "status": "added"})
             api.return_value = additional_code
